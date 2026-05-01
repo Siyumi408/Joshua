@@ -21,7 +21,8 @@ const LAND_Z_HEIGHT = 0.075
 const NUM_DRONES = 2
 
 export default function App() {
-  const [cameraStreamRunning, setCameraStreamRunning] = useState(false);
+  const [cameraStreamRunning, setCameraStreamRunning] = useState(true);
+  const [cameraStreamNonce, setCameraStreamNonce] = useState(0);
 
   const [exposure, setExposure] = useState(100);
   const [gain, setGain] = useState(0);
@@ -75,6 +76,18 @@ export default function App() {
     }
     socket.emit("capture-points", { startOrStop })
   }
+
+  useEffect(() => {
+    const handleConnect = () => {
+      setCameraStreamNonce((value) => value + 1)
+    }
+
+    socket.on("connect", handleConnect)
+
+    return () => {
+      socket.off("connect", handleConnect)
+    }
+  }, [])
 
   useEffect(() => {
     socket.on("image-points", (data) => {
@@ -364,6 +377,9 @@ export default function App() {
                   className='me-3'
                   variant={cameraStreamRunning ? "outline-danger" : "outline-primary"}
                   onClick={() => {
+                    if (!cameraStreamRunning) {
+                      setCameraStreamNonce((value) => value + 1)
+                    }
                     setCameraStreamRunning(!cameraStreamRunning);
                   }}
                 >
@@ -374,7 +390,7 @@ export default function App() {
             </Row>
             <Row className='mt-2 mb-1' style={{ height: "320px" }}>
               <Col>
-                <img src={cameraStreamRunning ? "http://localhost:3001/api/camera-stream" : ""} />
+                <img src={cameraStreamRunning ? `http://localhost:3001/api/camera-stream?ts=${cameraStreamNonce}` : ""} />
               </Col>
             </Row>
           </Card>

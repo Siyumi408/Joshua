@@ -1,0 +1,12 @@
+flask
+flask-cors
+flask-socketio
+numpy
+opencv-python
+pyserial
+scipy
+#cd "c:\Users\Admin\Desktop\AI-ML Courses\Joshua\computer_code\api"
+#python -m pip install -r requirements.txt
+#cd /d "c:\Users\Admin\Desktop\AI-ML Courses\Joshua\computer_code\api"
+#set USB_CAMERA_INDICES=0,1,2,3
+#python index.py

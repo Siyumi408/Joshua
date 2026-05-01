@@ -6,10 +6,15 @@ import copy
 import json
 import os
 import time
+import threading
+from collections import deque
 import numpy as np
 import cv2 as cv
 from KalmanFilter import KalmanFilter
 from Singleton import Singleton
+
+CAMERA_FRAME_WIDTH = 320
+CAMERA_FRAME_HEIGHT = 240
 
 
 @Singleton
@@ -22,6 +27,12 @@ class Cameras:
 
         self.cameras = self._open_usb_cameras()
         self.num_cameras = len(self.cameras)
+        self.frame_buffers = [deque(maxlen=8) for _ in range(self.num_cameras)]
+        self.frame_locks = [threading.Lock() for _ in range(self.num_cameras)]
+        self.frame_ready_events = [threading.Event() for _ in range(self.num_cameras)]
+        self.camera_threads = []
+        self._start_camera_threads()
+        self._wait_for_initial_frames()
         print(self.num_cameras)
 
         self.is_capturing_points = False
@@ -117,9 +128,10 @@ class Cameras:
                                         "pos": [round(x, 4) for x in filtered_object["pos"].tolist()] + [filtered_object["heading"]],
                                         "vel": [round(x, 4) for x in filtered_object["vel"].tolist()]
                                     }
-                                    with self.serialLock:
-                                        self.ser.write(f"{filtered_object['droneIndex']}{json.dumps(serial_data)}".encode('utf-8'))
-                                        time.sleep(0.001)
+                                    if self.ser is not None and self.serialLock is not None:
+                                        with self.serialLock:
+                                            self.ser.write(f"{filtered_object['droneIndex']}{json.dumps(serial_data)}".encode('utf-8'))
+                                            time.sleep(0.001)
                             
                         for filtered_object in filtered_objects:
                             filtered_object["vel"] = filtered_object["vel"].tolist()
@@ -154,8 +166,8 @@ class Cameras:
                 failed_indices.append(camera_index)
                 continue
 
-            camera.set(cv.CAP_PROP_FRAME_WIDTH, 320)
-            camera.set(cv.CAP_PROP_FRAME_HEIGHT, 240)
+            camera.set(cv.CAP_PROP_FRAME_WIDTH, CAMERA_FRAME_WIDTH)
+            camera.set(cv.CAP_PROP_FRAME_HEIGHT, CAMERA_FRAME_HEIGHT)
             camera.set(cv.CAP_PROP_FPS, 90)
             cameras.append(camera)
 
@@ -165,22 +177,64 @@ class Cameras:
                 "Set USB_CAMERA_INDICES to a comma-separated list such as '0,1'."
             )
 
-        if len(cameras) != len(self.camera_params):
-            raise RuntimeError(
-                f"Opened {len(cameras)} USB camera(s), but camera-params.json has "
-                f"{len(self.camera_params)} configuration entries. Failed indices: {failed_indices}"
+        if len(cameras) < len(self.camera_params):
+            print(
+                f"Warning: opened {len(cameras)} USB camera(s), but camera-params.json has "
+                f"{len(self.camera_params)} configuration entries. Using the first "
+                f"{len(cameras)} camera parameter set(s). Failed indices: {failed_indices}"
             )
 
         return cameras
 
-    def _read_usb_frames(self):
-        frames = []
+    def _start_camera_threads(self):
+        for camera_index in range(self.num_cameras):
+            thread = threading.Thread(
+                target=self._camera_reader_loop,
+                args=(camera_index,),
+                daemon=True
+            )
+            thread.start()
+            self.camera_threads.append(thread)
 
-        for camera_index, camera in enumerate(self.cameras):
+    def _camera_reader_loop(self, camera_index):
+        camera = self.cameras[camera_index]
+        while True:
             ok, frame = camera.read()
             if not ok or frame is None:
-                raise RuntimeError(f"Failed to read frame from USB camera index {camera_index}")
-            frames.append(frame)
+                time.sleep(0.01)
+                continue
+
+            timestamp = time.time()
+            with self.frame_locks[camera_index]:
+                self.frame_buffers[camera_index].append((timestamp, frame))
+                self.frame_ready_events[camera_index].set()
+
+    def _wait_for_initial_frames(self, timeout=5.0):
+        deadline = time.time() + timeout
+        for camera_index, ready_event in enumerate(self.frame_ready_events):
+            remaining = deadline - time.time()
+            if remaining <= 0 or not ready_event.wait(remaining):
+                raise RuntimeError(f"Timed out waiting for the first frame from USB camera index {camera_index}")
+
+    def _read_usb_frames(self):
+        latest_entries = []
+
+        for camera_index in range(self.num_cameras):
+            with self.frame_locks[camera_index]:
+                if not self.frame_buffers[camera_index]:
+                    raise RuntimeError(f"No buffered frame available for USB camera index {camera_index}")
+                latest_entries.append(self.frame_buffers[camera_index][-1])
+
+        reference_timestamp = min(timestamp for timestamp, _ in latest_entries)
+        frames = []
+
+        for camera_index in range(self.num_cameras):
+            with self.frame_locks[camera_index]:
+                best_timestamp, best_frame = min(
+                    self.frame_buffers[camera_index],
+                    key=lambda entry: abs(entry[0] - reference_timestamp)
+                )
+                frames.append(best_frame.copy())
 
         return frames
 

@@ -6,19 +6,46 @@ import cv2 as cv
 import numpy as np
 import json
 from scipy import linalg
+import os
 
 from flask_socketio import SocketIO
 import copy
 import time
 import serial
 import threading
-from ruckig import InputParameter, OutputParameter, Result, Ruckig
 from flask_cors import CORS
 import json
 
+try:
+    from ruckig import InputParameter, OutputParameter, Result, Ruckig
+    RUCKIG_AVAILABLE = True
+except ImportError:
+    InputParameter = OutputParameter = Result = Ruckig = None
+    RUCKIG_AVAILABLE = False
+
 serialLock = threading.Lock()
 
-ser = serial.Serial("/dev/cu.usbserial-02X2K2GE", 1000000, write_timeout=1, )
+def open_serial():
+    serial_port = os.getenv("DRONE_SERIAL_PORT")
+    if not serial_port:
+        print("DRONE_SERIAL_PORT not set; starting without serial output.")
+        return None
+
+    try:
+        return serial.Serial(serial_port, 1000000, write_timeout=1)
+    except serial.SerialException as exc:
+        print(f"Failed to open serial port '{serial_port}': {exc}")
+        print("Starting without serial output.")
+        return None
+
+ser = open_serial()
+
+def write_serial(drone_index, serial_data):
+    if ser is None:
+        return
+
+    with serialLock:
+        ser.write(f"{drone_index}{json.dumps(serial_data)}".encode('utf-8'))
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -53,7 +80,10 @@ def camera_stream():
                 time.sleep(last_run_time - time_now + loop_interval)
             last_run_time = time.time()
             frames = cameras.get_frames()
-            jpeg_frame = cv.imencode('.jpg', frames)[1].tostring()
+            ok, encoded_frame = cv.imencode('.jpg', frames)
+            if not ok:
+                continue
+            jpeg_frame = encoded_frame.tobytes()
 
             yield (b'--frame\r\n'
                 b'Content-Type: image/jpeg\r\n\r\n' + jpeg_frame + b'\r\n')
@@ -62,6 +92,11 @@ def camera_stream():
 
 @app.route("/api/trajectory-planning", methods=["POST"])
 def trajectory_planning_api():
+    if not RUCKIG_AVAILABLE:
+        return json.dumps({
+            "error": "Trajectory planning is unavailable because the optional 'ruckig' package is not installed."
+        }), 501
+
     data = json.loads(request.data)
 
     waypoint_groups = [] # grouped by continuious movement (no stopping)
@@ -122,8 +157,7 @@ def arm_drone(data):
         serial_data = {
             "armed": data["droneArmed"][droneIndex],
         }
-        with serialLock:
-            ser.write(f"{str(droneIndex)}{json.dumps(serial_data)}".encode('utf-8'))
+        write_serial(str(droneIndex), serial_data)
         
         time.sleep(0.01)
 
@@ -132,27 +166,24 @@ def arm_drone(data):
     serial_data = {
         "pid": [float(x) for x in data["dronePID"]],
     }
-    with serialLock:
-        ser.write(f"{str(data['droneIndex'])}{json.dumps(serial_data)}".encode('utf-8'))
-        time.sleep(0.01)
+    write_serial(str(data["droneIndex"]), serial_data)
+    time.sleep(0.01)
 
 @socketio.on("set-drone-setpoint")
 def arm_drone(data):
     serial_data = {
         "setpoint": [float(x) for x in data["droneSetpoint"]],
     }
-    with serialLock:
-        ser.write(f"{str(data['droneIndex'])}{json.dumps(serial_data)}".encode('utf-8'))
-        time.sleep(0.01)
+    write_serial(str(data["droneIndex"]), serial_data)
+    time.sleep(0.01)
 
 @socketio.on("set-drone-trim")
 def arm_drone(data):
     serial_data = {
         "trim": [int(x) for x in data["droneTrim"]],
     }
-    with serialLock:
-        ser.write(f"{str(data['droneIndex'])}{json.dumps(serial_data)}".encode('utf-8'))
-        time.sleep(0.01)
+    write_serial(str(data["droneIndex"]), serial_data)
+    time.sleep(0.01)
 
 
 @socketio.on("acquire-floor")
