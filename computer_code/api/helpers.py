@@ -9,7 +9,6 @@ import time
 import numpy as np
 import cv2 as cv
 from KalmanFilter import KalmanFilter
-from pseyepy import Camera
 from Singleton import Singleton
 
 
@@ -21,8 +20,8 @@ class Cameras:
         f = open(filename)
         self.camera_params = json.load(f)
 
-        self.cameras = Camera(fps=90, resolution=Camera.RES_SMALL, gain=10, exposure=100)
-        self.num_cameras = len(self.cameras.exposure)
+        self.cameras = self._open_usb_cameras()
+        self.num_cameras = len(self.cameras)
         print(self.num_cameras)
 
         self.is_capturing_points = False
@@ -62,11 +61,12 @@ class Cameras:
         self.drone_armed = [False for i in range(0, self.num_objects)]
     
     def edit_settings(self, exposure, gain):
-        self.cameras.exposure = [exposure] * self.num_cameras
-        self.cameras.gain = [gain] * self.num_cameras
+        for camera in self.cameras:
+            camera.set(cv.CAP_PROP_EXPOSURE, exposure)
+            camera.set(cv.CAP_PROP_GAIN, gain)
 
     def _camera_read(self):
-        frames, _ = self.cameras.read()
+        frames = self._read_usb_frames()
 
         for i in range(0, self.num_cameras):
             frames[i] = np.rot90(frames[i], k=self.camera_params[i]["rotation"])
@@ -132,6 +132,56 @@ class Cameras:
                         "filtered_objects": filtered_objects
                     })
         
+        return frames
+
+    def _open_usb_cameras(self):
+        configured_indices = os.getenv("USB_CAMERA_INDICES")
+        if configured_indices:
+            camera_indices = [int(index.strip()) for index in configured_indices.split(",") if index.strip()]
+        else:
+            camera_indices = list(range(len(self.camera_params)))
+
+        cameras = []
+        failed_indices = []
+
+        for camera_index in camera_indices:
+            camera = cv.VideoCapture(camera_index, cv.CAP_DSHOW)
+            if not camera.isOpened():
+                camera.release()
+                camera = cv.VideoCapture(camera_index)
+
+            if not camera.isOpened():
+                failed_indices.append(camera_index)
+                continue
+
+            camera.set(cv.CAP_PROP_FRAME_WIDTH, 320)
+            camera.set(cv.CAP_PROP_FRAME_HEIGHT, 240)
+            camera.set(cv.CAP_PROP_FPS, 90)
+            cameras.append(camera)
+
+        if not cameras:
+            raise RuntimeError(
+                "No USB cameras could be opened. "
+                "Set USB_CAMERA_INDICES to a comma-separated list such as '0,1'."
+            )
+
+        if len(cameras) != len(self.camera_params):
+            raise RuntimeError(
+                f"Opened {len(cameras)} USB camera(s), but camera-params.json has "
+                f"{len(self.camera_params)} configuration entries. Failed indices: {failed_indices}"
+            )
+
+        return cameras
+
+    def _read_usb_frames(self):
+        frames = []
+
+        for camera_index, camera in enumerate(self.cameras):
+            ok, frame = camera.read()
+            if not ok or frame is None:
+                raise RuntimeError(f"Failed to read frame from USB camera index {camera_index}")
+            frames.append(frame)
+
         return frames
 
     def get_frames(self):
